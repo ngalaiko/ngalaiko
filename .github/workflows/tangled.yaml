@@ -1,0 +1,43 @@
+name: Mirror ALL GitHub repos to Tangled
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "15 2 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  list-repos:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Build repo list (non-fork)
+        id: gen
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}   # PAT with 'repo' read access across the owner
+        run: |
+          owner="ngalaiko"
+          # List org repos if org exists; otherwise falls back to user repos
+          endpoint="/users/$owner/repos?per_page=100&type=all"
+          gh api -H "Accept: application/vnd.github+json" "$endpoint" --paginate \
+          | jq -r '.[] | select(.fork==false) | .name' \
+          | jq -R -s -c 'split("\n")[:-1]' > repos.json
+          echo "matrix=$(cat repos.json)" >> "$GITHUB_OUTPUT"
+
+  mirror:
+    needs: list-repos
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJson(needs.list-repos.outputs.matrix) }}
+    steps:
+      - name: Mirror ${{ matrix.repo }} to Tangled
+        uses: gwennlbh/to-tangled@v0.3
+        with:
+          repo: galaiko.rocks/${{ matrix.repo }}
+          ssh-key: ${{ secrets.TANGLED_KEY }}
+          knot: tangled.sh
