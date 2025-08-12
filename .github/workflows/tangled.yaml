@@ -38,6 +38,6 @@ jobs:
       - name: Mirror ${{ matrix.repo }} to Tangled
         uses: gwennlbh/to-tangled@v0.3
         with:
-          repo: galaiko.rocks/${{ matrix.repo }}
+          repo: "@galaiko.rocks/${{ matrix.repo }}"
           ssh-key: ${{ secrets.TANGLED_KEY }}
           knot: tangled.sh
