@@ -14,17 +14,23 @@ jobs:
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
-      - name: Build repo list (non-fork)
+      - name: Build repo list (non-archived, non-fork)
         id: gen
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}   # PAT with 'repo' read access across the owner
+          GH_TOKEN: ${{ secrets.GH_PAT }}   # PAT with read access to all repos for 'owner'
         run: |
+          set -euo pipefail
           owner="ngalaiko"
-          # List org repos if org exists; otherwise falls back to user repos
-          endpoint="/users/$owner/repos?per_page=100&type=all"
+          if gh api /orgs/$owner >/dev/null 2>&1; then
+            endpoint="/orgs/$owner/repos?per_page=100&type=all"
+          else
+            endpoint="/users/$owner/repos?per_page=100&type=all"
+          fi
+
           gh api -H "Accept: application/vnd.github+json" "$endpoint" --paginate \
-          | jq -r '.[] | select(.fork==false) | .name' \
+          | jq -r '.[] | select(.fork==false) | select(.archived==false) | .name' \
           | jq -R -s -c 'split("\n")[:-1]' > repos.json
+
           echo "matrix=$(cat repos.json)" >> "$GITHUB_OUTPUT"
 
   mirror:
@@ -34,10 +40,39 @@ jobs:
       fail-fast: false
       matrix:
         repo: ${{ fromJson(needs.list-repos.outputs.matrix) }}
+    env:
+      OWNER: ngalaiko
+      TANGLED_HANDLE: galaiko.rocks
     steps:
+      - name: Prepare SSH key for Tangled
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${TANGLED_SSH_KEY}" > ~/.ssh/tangled_key
+          chmod 600 ~/.ssh/tangled_key
+          {
+            echo "Host tangled.sh"
+            echo "  IdentityFile ~/.ssh/tangled_key"
+            echo "  StrictHostKeyChecking no"
+            echo "  UserKnownHostsFile=/dev/null"
+          } >> ~/.ssh/config
+        env:
+          TANGLED_SSH_KEY: ${{ secrets.TANGLED_KEY }}
+
       - name: Mirror ${{ matrix.repo }} to Tangled
-        uses: gwennlbh/to-tangled@v0.3
-        with:
-          repo: galaiko.rocks/${{ matrix.repo }}
-          ssh-key: ${{ secrets.TANGLED_KEY }}
-          knot: tangled.sh
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          SRC="https://x-access-token:${GH_PAT}@github.com/ngalaiko/${{ matrix.repo }}.git"
+          DEST="git@tangled.sh:${TANGLED_HANDLE}/${{ matrix.repo }}"
+          workdir="$(mktemp -d)"
+
+          echo "Cloning ${SRC}"
+          git clone --mirror "$SRC" "$workdir/repo.git"
+
+          cd "$workdir/repo.git"
+          # Optional: verify remote is reachable (will fail if repo missing or no access)
+          git remote add tangled "$DEST"
+          echo "Pushing mirror to ${DEST}"
+          git push --mirror tangled
