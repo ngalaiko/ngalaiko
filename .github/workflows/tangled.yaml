@@ -40,4 +40,72 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        repo: ${{
+        repo: ${{ fromJson(needs.list-repos.outputs.matrix) }}
+    env:
+      OWNER: ngalaiko
+      TANGLED_HANDLE: galaiko.rocks
+      TANGLED_HOST: tangled.org
+
+    steps:
+      - name: Prepare SSH key for Tangled
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "${TANGLED_SSH_KEY}" > ~/.ssh/tangled_key
+          chmod 600 ~/.ssh/tangled_key
+          cat >> ~/.ssh/config <<EOF
+          Host $TANGLED_HOST
+            IdentityFile ~/.ssh/tangled_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+          EOF
+        env:
+          TANGLED_SSH_KEY: ${{ secrets.TANGLED_KEY }}
+
+      - name: Create repo on Tangled if missing
+        env:
+          TANGLED_TOKEN: ${{ inputs.tangled_token }}
+        run: |
+          set -euo pipefail
+          repo="${{ matrix.repo }}"
+
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://${TANGLED_HOST}/${TANGLED_HANDLE}/${repo}")
+
+          if [ "$status" = "200" ]; then
+            echo "Repo ${repo} already exists on Tangled, skipping creation."
+            exit 0
+          fi
+
+          echo "Repo ${repo} not found (HTTP $status), creating..."
+
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://${TANGLED_HOST}/repo" \
+            -H "Authorization: Bearer ${TANGLED_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\": \"${repo}\", \"description\": \"Mirror of github.com/${OWNER}/${repo}\", \"knot\": \"knot1.${TANGLED_HOST}\"}")
+
+          http_code=$(echo "$response" | tail -1)
+          body=$(echo "$response" | head -n -1)
+
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "Created repo ${repo} on Tangled."
+          else
+            echo "Failed to create repo ${repo}: HTTP $http_code"
+            echo "$body"
+            exit 1
+          fi
+
+      - name: Mirror ${{ matrix.repo }} to Tangled
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -euo pipefail
+          SRC="https://x-access-token:${GH_PAT}@github.com/${OWNER}/${{ matrix.repo }}.git"
+          DEST="git@${TANGLED_HOST}:${TANGLED_HANDLE}/${{ matrix.repo }}"
+          workdir="$(mktemp -d)"
+
+          git clone --mirror "$SRC" "$workdir/repo.git"
+          cd "$workdir/repo.git"
+          git remote add tangled "$DEST"
+          git push --mirror tangled
